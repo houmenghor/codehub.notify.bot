@@ -64,7 +64,7 @@ def telegram_webhook():
     # ---------------------------------------------------------------
     # /subscribe -> Add user + show payload info
     # ---------------------------------------------------------------
-    if text.startswith("/subscribe"):
+    if text == "/subscribe":
         if not find_subscriber(chat_id, subscribers):
             subscribers.append({"chat_id": chat_id, "repo": None, "active": False})
             save_json(SUBSCRIBERS_FILE, subscribers)
@@ -86,7 +86,7 @@ def telegram_webhook():
     # ---------------------------------------------------------------
     # /unsubscribe -> Remove user completely
     # ---------------------------------------------------------------
-    elif text.startswith("/unsubscribe"):
+    elif text == "/unsubscribe":
         before = len(subscribers)
         subscribers = [s for s in subscribers if s["chat_id"] != chat_id]
         save_json(SUBSCRIBERS_FILE, subscribers)
@@ -98,7 +98,7 @@ def telegram_webhook():
     # ---------------------------------------------------------------
     # /start -> Start receiving notifications
     # ---------------------------------------------------------------
-    elif text.startswith("/start"):
+    elif text == "/start":
         sub = find_subscriber(chat_id, subscribers)
         if not sub:
             send_message(chat_id, "❗ Please /subscribe first before starting notifications.")
@@ -110,7 +110,7 @@ def telegram_webhook():
     # ---------------------------------------------------------------
     # /stop -> Stop receiving notifications
     # ---------------------------------------------------------------
-    elif text.startswith("/stop"):
+    elif text == "/stop":
         sub = find_subscriber(chat_id, subscribers)
         if not sub:
             send_message(chat_id, "❗ You are not subscribed yet. Use /subscribe first.")
@@ -122,7 +122,7 @@ def telegram_webhook():
     # ---------------------------------------------------------------
     # /connect -> Link repository
     # ---------------------------------------------------------------
-    elif text.startswith("/connect"):
+    elif text == "/connect":
         sub = find_subscriber(chat_id, subscribers)
         if not sub:
             send_message(chat_id, "❗ Please /subscribe first before connecting a repo.")
@@ -159,7 +159,7 @@ def telegram_webhook():
     # ---------------------------------------------------------------
     # /status
     # ---------------------------------------------------------------
-    elif text.startswith("/status"):
+    elif text == "/status":
         sub = find_subscriber(chat_id, subscribers)
         if not sub:
             send_message(chat_id, "❗ You are not subscribed yet.")
@@ -169,9 +169,9 @@ def telegram_webhook():
             send_message(chat_id, f"📊 <b>Status</b>\n\n🔗 Repo: {repo}\n🔔 Notifications: {active}")
 
     # ---------------------------------------------------------------
-    # /subscribers  ✅ NEW COMMAND
+    # /subscribers ✅ Fixed exact match
     # ---------------------------------------------------------------
-    elif text.startswith("/subscribers"):
+    elif text == "/subscribers":
         total = len(subscribers)
         active_users = sum(1 for s in subscribers if s.get("active"))
         send_message(chat_id, (
@@ -183,7 +183,7 @@ def telegram_webhook():
     # ---------------------------------------------------------------
     # /help
     # ---------------------------------------------------------------
-    elif text.startswith("/help"):
+    elif text == "/help":
         help_msg = (
             "🤖 <b>Available Commands</b>\n\n"
             "/subscribe - Subscribe and get webhook info\n"
