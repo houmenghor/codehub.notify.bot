@@ -61,7 +61,7 @@ def set_group_id(group_id):
         json.dump({"group_id": group_id}, f, indent=2)
 
 def is_group_admin(chat_id, user_id):
-    """Check if the user is admin in the group."""
+    """Check if user is admin in the group."""
     url = f"{BASE_URL}/getChatAdministrators"
     res = requests.get(url, params={"chat_id": chat_id})
     if not res.ok:
@@ -86,21 +86,21 @@ def telegram_webhook():
     text = msg.get("text", "").strip()
     from_user = msg.get("from", {})
     user_id = from_user.get("id")
+
     subscribers = load_json(SUBSCRIBERS_FILE)
     waiting = load_json(WAITING_FILE)
 
-    # 🚫 Ignore all commands in group except /setgroup
+    # ✅ Handle /setgroup inside the same webhook
     if chat_type in ["group", "supergroup"]:
         if text == "/setgroup":
-            # only group admins can register group
             if not is_group_admin(chat_id, user_id):
                 send_message(chat_id, "❌ Only group admins can register this group for GitHub notifications.")
                 return "ok"
             set_group_id(chat_id)
             send_message(chat_id, "✅ This group is now registered for GitHub notifications.")
+            return "ok"
         else:
-            return "ok"  # ignore all other group commands
-        return "ok"
+            return "ok"  # ignore all other commands in group
 
     # ✅ Private chat commands
     if text == "/subscribe":
@@ -187,7 +187,8 @@ def telegram_webhook():
         else:
             repo = sub.get("repo", "Not connected")
             active = "🟢 Active" if sub.get("active") else "🔴 Stopped"
-            send_message(chat_id, f"📊 <b>Status</b>\n\n🔗 Repo: {repo}\n🔔 Notifications: {active}")
+            group = get_group_id() or "❌ No group registered"
+            send_message(chat_id, f"📊 <b>Status</b>\n\n🔗 Repo: {repo}\n👥 Group: {group}\n🔔 Notifications: {active}")
 
     elif text == "/subscribers":
         total = len(subscribers)
@@ -206,7 +207,7 @@ def telegram_webhook():
             "/start - Start receiving notifications\n"
             "/stop - Stop receiving notifications\n"
             "/connect - Link your GitHub repository\n"
-            "/status - Show your connection and status\n"
+            "/status - Show connection and status\n"
             "/subscribers - Show total subscribers\n"
             "/help - Show all available commands"
         )
