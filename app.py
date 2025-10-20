@@ -10,7 +10,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "7985423327:AAGRGw6jM-ZK6GkGrExkUwc
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SUBSCRIBERS_FILE = "subscribers.json"
 WAITING_FILE = "waiting.json"
-PAYLOAD_URL = "https://codehubnotify.dev/github"  # your domain webhook endpoint
+GROUP_FILE = "group.json"  # store target group for notifications
+PAYLOAD_URL = "https://codehubnotify.dev/github"  # webhook endpoint
 
 app = Flask(__name__)
 
@@ -45,6 +46,32 @@ def find_subscriber(chat_id, subscribers):
             return sub
     return None
 
+def get_group_id():
+    if not os.path.exists(GROUP_FILE):
+        return None
+    with open(GROUP_FILE, "r") as f:
+        try:
+            data = json.load(f)
+            return data.get("group_id")
+        except json.JSONDecodeError:
+            return None
+
+def set_group_id(group_id):
+    with open(GROUP_FILE, "w") as f:
+        json.dump({"group_id": group_id}, f, indent=2)
+
+def is_group_admin(chat_id, user_id):
+    """Check if the user is admin in the group."""
+    url = f"{BASE_URL}/getChatAdministrators"
+    res = requests.get(url, params={"chat_id": chat_id})
+    if not res.ok:
+        return False
+    admins = res.json().get("result", [])
+    for admin in admins:
+        if str(admin["user"]["id"]) == str(user_id):
+            return True
+    return False
+
 
 # ===============================================================
 # 🤖 TELEGRAM HANDLER
@@ -57,35 +84,45 @@ def telegram_webhook():
     chat_id = str(chat.get("id"))
     chat_type = chat.get("type", "private")
     text = msg.get("text", "").strip()
-
+    from_user = msg.get("from", {})
+    user_id = from_user.get("id")
     subscribers = load_json(SUBSCRIBERS_FILE)
     waiting = load_json(WAITING_FILE)
 
-    # ---------------------------------------------------------------
-    # /subscribe -> Add user + show payload info
-    # ---------------------------------------------------------------
+    # 🚫 Ignore all commands in group except /setgroup
+    if chat_type in ["group", "supergroup"]:
+        if text == "/setgroup":
+            # only group admins can register group
+            if not is_group_admin(chat_id, user_id):
+                send_message(chat_id, "❌ Only group admins can register this group for GitHub notifications.")
+                return "ok"
+            set_group_id(chat_id)
+            send_message(chat_id, "✅ This group is now registered for GitHub notifications.")
+        else:
+            return "ok"  # ignore all other group commands
+        return "ok"
+
+    # ✅ Private chat commands
     if text == "/subscribe":
         if not find_subscriber(chat_id, subscribers):
             subscribers.append({"chat_id": chat_id, "repo": None, "active": False})
             save_json(SUBSCRIBERS_FILE, subscribers)
             send_message(chat_id, (
                 "✅ You are now subscribed to CodeHub Notify!\n\n"
-                f"📩 To receive GitHub updates, add this webhook URL to your repository:\n"
+                "📩 To receive GitHub updates in a group:\n"
+                "1️⃣ Add this bot to your Telegram group.\n"
+                "2️⃣ Send /setgroup in that group (admin only) to register it.\n\n"
+                "Then, in GitHub add this webhook URL:\n"
                 f"<code>{PAYLOAD_URL}</code>\n\n"
-                "In GitHub, go to:\n"
-                "<b>Settings → Webhooks → Add webhook</b>\n\n"
-                "Then:\n"
-                "• <b>Payload URL:</b> paste the link above\n"
-                "• <b>Content type:</b> application/json\n"
-                "• <b>Events:</b> Send me everything ✅\n\n"
+                "<b>GitHub → Settings → Webhooks → Add webhook</b>\n"
+                "• Payload URL: paste link above\n"
+                "• Content type: application/json\n"
+                "• Events: Send everything ✅\n\n"
                 "After that, use /connect to link your repository name."
             ))
         else:
             send_message(chat_id, "⚠️ You are already subscribed.")
 
-    # ---------------------------------------------------------------
-    # /unsubscribe -> Remove user completely
-    # ---------------------------------------------------------------
     elif text == "/unsubscribe":
         before = len(subscribers)
         subscribers = [s for s in subscribers if s["chat_id"] != chat_id]
@@ -95,9 +132,6 @@ def telegram_webhook():
         else:
             send_message(chat_id, "❗ You are not subscribed yet.")
 
-    # ---------------------------------------------------------------
-    # /start -> Start receiving notifications
-    # ---------------------------------------------------------------
     elif text == "/start":
         sub = find_subscriber(chat_id, subscribers)
         if not sub:
@@ -105,11 +139,8 @@ def telegram_webhook():
         else:
             sub["active"] = True
             save_json(SUBSCRIBERS_FILE, subscribers)
-            send_message(chat_id, "▶️ Notifications started! You’ll now receive GitHub updates.")
+            send_message(chat_id, "▶️ Notifications started! You’ll now receive GitHub updates in your group.")
 
-    # ---------------------------------------------------------------
-    # /stop -> Stop receiving notifications
-    # ---------------------------------------------------------------
     elif text == "/stop":
         sub = find_subscriber(chat_id, subscribers)
         if not sub:
@@ -119,9 +150,6 @@ def telegram_webhook():
             save_json(SUBSCRIBERS_FILE, subscribers)
             send_message(chat_id, "⏸️ Notifications stopped. You can start again anytime with /start.")
 
-    # ---------------------------------------------------------------
-    # /connect -> Link repository
-    # ---------------------------------------------------------------
     elif text == "/connect":
         sub = find_subscriber(chat_id, subscribers)
         if not sub:
@@ -132,9 +160,6 @@ def telegram_webhook():
                 save_json(WAITING_FILE, waiting)
             send_message(chat_id, "📎 Please send your GitHub repository link (example: https://github.com/user/repo)")
 
-    # ---------------------------------------------------------------
-    # Handle repo input after /connect
-    # ---------------------------------------------------------------
     elif chat_id in waiting:
         repo_input = text
         if repo_input.startswith("https://github.com/"):
@@ -148,17 +173,13 @@ def telegram_webhook():
             save_json(SUBSCRIBERS_FILE, subscribers)
             waiting.remove(chat_id)
             save_json(WAITING_FILE, waiting)
-
             send_message(chat_id,
                 f"🔗 Connected to <b>{repo_name}</b>\n\n"
-                f"Your group will now receive GitHub push notifications from this repo."
+                f"Your <b>group</b> will now receive GitHub push notifications from this repo."
             )
         else:
             send_message(chat_id, "⚠️ You must /subscribe first before linking a repo.")
 
-    # ---------------------------------------------------------------
-    # /status
-    # ---------------------------------------------------------------
     elif text == "/status":
         sub = find_subscriber(chat_id, subscribers)
         if not sub:
@@ -168,9 +189,6 @@ def telegram_webhook():
             active = "🟢 Active" if sub.get("active") else "🔴 Stopped"
             send_message(chat_id, f"📊 <b>Status</b>\n\n🔗 Repo: {repo}\n🔔 Notifications: {active}")
 
-    # ---------------------------------------------------------------
-    # /subscribers ✅ Fixed exact match
-    # ---------------------------------------------------------------
     elif text == "/subscribers":
         total = len(subscribers)
         active_users = sum(1 for s in subscribers if s.get("active"))
@@ -180,9 +198,6 @@ def telegram_webhook():
             "Thank you for using CodeHub Notify Bot 🚀"
         ))
 
-    # ---------------------------------------------------------------
-    # /help
-    # ---------------------------------------------------------------
     elif text == "/help":
         help_msg = (
             "🤖 <b>Available Commands</b>\n\n"
@@ -192,7 +207,7 @@ def telegram_webhook():
             "/stop - Stop receiving notifications\n"
             "/connect - Link your GitHub repository\n"
             "/status - Show your connection and status\n"
-            "/subscribers - Show total number of subscribers\n"
+            "/subscribers - Show total subscribers\n"
             "/help - Show all available commands"
         )
         send_message(chat_id, help_msg)
@@ -213,7 +228,11 @@ def github_webhook():
     event = request.headers.get("X-GitHub-Event", "ping")
     repo = payload.get("repository", {}).get("full_name", "unknown/repo")
     repo_url = payload.get("repository", {}).get("html_url", "")
-    subscribers = load_json(SUBSCRIBERS_FILE)
+    group_id = get_group_id()
+
+    if not group_id:
+        print("⚠️ No group registered. Use /setgroup in the group to enable notifications.")
+        return "ok"
 
     if event == "push":
         pusher = payload.get("pusher", {}).get("name", "Unknown")
@@ -238,7 +257,6 @@ def github_webhook():
         )
 
     elif event == "create":
-        ref_type = payload.get("ref_type", "")
         ref_name = payload.get("ref", "")
         sender = payload.get("sender", {}).get("login", "")
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -253,10 +271,7 @@ def github_webhook():
     else:
         msg = f"🔔 GitHub event: {event} in {repo}"
 
-    for sub in subscribers:
-        if sub.get("repo") == repo and sub.get("active", False):
-            send_message(sub["chat_id"], msg)
-
+    send_message(group_id, msg)
     return "ok"
 
 
