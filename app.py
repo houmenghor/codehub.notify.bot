@@ -169,6 +169,18 @@ def telegram_webhook():
             send_message(chat_id, f"📊 <b>Status</b>\n\n🔗 Repo: {repo}\n🔔 Notifications: {active}")
 
     # ---------------------------------------------------------------
+    # /subscribers  ✅ NEW COMMAND
+    # ---------------------------------------------------------------
+    elif text.startswith("/subscribers"):
+        total = len(subscribers)
+        active_users = sum(1 for s in subscribers if s.get("active"))
+        send_message(chat_id, (
+            f"👥 <b>Total Subscribers:</b> {total}\n"
+            f"🔔 <b>Active Notifications:</b> {active_users}\n\n"
+            "Thank you for using CodeHub Notify Bot 🚀"
+        ))
+
+    # ---------------------------------------------------------------
     # /help
     # ---------------------------------------------------------------
     elif text.startswith("/help"):
@@ -180,6 +192,7 @@ def telegram_webhook():
             "/stop - Stop receiving notifications\n"
             "/connect - Link your GitHub repository\n"
             "/status - Show your connection and status\n"
+            "/subscribers - Show total number of subscribers\n"
             "/help - Show all available commands"
         )
         send_message(chat_id, help_msg)
