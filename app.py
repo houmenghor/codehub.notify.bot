@@ -123,42 +123,62 @@ def telegram_webhook():
             save_json(SUBSCRIBERS_FILE, subscribers)
             send_message(chat_id, "⏸️ Notifications stopped. You can start again anytime with /start.")
 
-    # ---------------------------------------------------------------
-    # /connect -> Link repository
-    # ---------------------------------------------------------------
-    elif command == "/connect":
-        sub = find_subscriber(chat_id, subscribers)
-        if not sub:
-            send_message(chat_id, "❗ Please /subscribe first before connecting a repo.")
-        else:
-            if chat_id not in waiting:
-                waiting.append(chat_id)
-                save_json(WAITING_FILE, waiting)
-            send_message(chat_id, "📎 Please send your GitHub repository link (example: https://github.com/user/repo)")
-
-    # ---------------------------------------------------------------
-    # Handle repo input after /connect
-    # ---------------------------------------------------------------
-    elif chat_id in waiting:
-        repo_input = text
-        if repo_input.startswith("https://github.com/"):
-            repo_name = repo_input.replace("https://github.com/", "").strip("/")
-        else:
-            repo_name = repo_input
-
-        sub = find_subscriber(chat_id, subscribers)
-        if sub:
-            sub["repo"] = repo_name
-            save_json(SUBSCRIBERS_FILE, subscribers)
-            waiting.remove(chat_id)
+# ---------------------------------------------------------------
+# /connect -> Link repository
+# ---------------------------------------------------------------
+elif command == "/connect":
+    sub = find_subscriber(chat_id, subscribers)
+    if not sub:
+        send_message(chat_id, "❗ Please /subscribe first before connecting a repo.")
+    else:
+        if chat_id not in waiting:
+            waiting.append(chat_id)
             save_json(WAITING_FILE, waiting)
+        send_message(chat_id, (
+            "📎 Please send your GitHub repository link (example: https://github.com/user/repo)\n\n"
+            "If you already connected before, sending a new link will update your repository."
+        ))
 
+# ---------------------------------------------------------------
+# Handle repo input after /connect
+# ---------------------------------------------------------------
+elif chat_id in waiting:
+    repo_input = text.strip()
+
+    # ✅ Only accept GitHub repo links
+    if not repo_input.startswith("https://github.com/"):
+        send_message(chat_id, "❌ Please send a valid GitHub repository link (e.g., https://github.com/user/repo)")
+        return "ok"
+
+    # Extract the "user/repo" part
+    repo_name = repo_input.replace("https://github.com/", "").strip("/")
+
+    # ✅ Validate format "user/repo"
+    if "/" not in repo_name or len(repo_name.split("/")) != 2:
+        send_message(chat_id, "⚠️ Invalid repository format. Example: https://github.com/user/repo")
+        return "ok"
+
+    # ✅ Save or update repo connection
+    sub = find_subscriber(chat_id, subscribers)
+    if sub:
+        old_repo = sub.get("repo")
+        sub["repo"] = repo_name
+        save_json(SUBSCRIBERS_FILE, subscribers)
+        waiting.remove(chat_id)
+        save_json(WAITING_FILE, waiting)
+
+        if old_repo and old_repo != repo_name:
             send_message(chat_id,
-                f"🔗 Connected to <b>{repo_name}</b>\n\n"
-                f"Your group will now receive GitHub push notifications from this repo."
+                f"🔁 Repository updated from <b>{old_repo}</b> to <b>{repo_name}</b>\n\n"
+                f"You’ll now receive notifications from the new repo."
             )
         else:
-            send_message(chat_id, "⚠️ You must /subscribe first before linking a repo.")
+            send_message(chat_id,
+                f"🔗 Connected to <b>{repo_name}</b>\n\n"
+                f"You’ll now receive GitHub push notifications from this repo."
+            )
+    else:
+        send_message(chat_id, "⚠️ You must /subscribe first before linking a repo.")
 
     # ---------------------------------------------------------------
     # /status
