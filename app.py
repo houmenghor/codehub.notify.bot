@@ -1,7 +1,8 @@
 from flask import Flask, request
 import requests, json, os
+import datetime
 from waitress import serve
-from datetime import datetime
+from zoneinfo import ZoneInfo  # ✅ for Cambodia timezone (Python 3.9+)
 
 # ===============================================================
 # 🔧 CONFIGURATION
@@ -244,7 +245,8 @@ def github_webhook():
         branch = payload.get("ref", "").split("/")[-1]
         commits = payload.get("commits", [])
         commit_count = len(commits)
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # ✅ Get local time in Cambodia
+        kh_time = datetime.datetime.now(ZoneInfo("Asia/Phnom_Penh")).strftime("%Y-%m-%d %H:%M:%S")
 
         commit_lines = ""
         for commit in commits:
@@ -257,7 +259,7 @@ def github_webhook():
             f"📦 <b>Repo:</b> <a href=\"{repo_url}\">{repo}</a>\n"
             f"👤 <b>Pushed by:</b> {pusher}\n"
             f"🌿 <b>Branch:</b> {branch}\n"
-            f"🕒 <b>Time:</b> {timestamp}\n\n"
+            f"🕒 <b>Time:</b> {kh_time}\n\n"
             f"🚀 <b>{commit_count} commit(s) pushed:</b>\n{commit_lines}"
         )
 
@@ -265,14 +267,14 @@ def github_webhook():
         ref_type = payload.get("ref_type", "")
         ref_name = payload.get("ref", "")
         sender = payload.get("sender", {}).get("login", "")
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        kh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         msg = (
             f"🌿 <b>New Branch Created!</b>\n\n"
             f"📦 <b>Repo:</b> <a href=\"{repo_url}\">{repo}</a>\n"
             f"🌱 <b>Branch:</b> {ref_name}\n"
             f"👤 <b>By:</b> {sender}\n"
-            f"🕒 <b>DateTime:</b> {timestamp}"
+            f"🕒 <b>DateTime:</b> {kh_time}"
         )
     else:
         msg = f"🔔 GitHub event: {event} in {repo}"
