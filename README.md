@@ -3,7 +3,6 @@
 CodeHub Notify Bot is a Telegram bot that sends **real-time GitHub notifications** — such as new commits or branch creations — directly to your Telegram group.
 
 🌐 **Live Bot:** [@codehub_notify_bot](https://t.me/codehub_notify_bot)  
-🔗 **Website:** [https://codehubnotify.dev](https://codehubnotify.dev)
 
 ---
 

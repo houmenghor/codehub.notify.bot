@@ -1,26 +1,26 @@
 from flask import Flask, request
-import requests, json, os
-import datetime
+import requests, json, os, datetime, html, hmac, hashlib
 from waitress import serve
-from zoneinfo import ZoneInfo  # ✅ for Cambodia timezone (Python 3.9+)
+from zoneinfo import ZoneInfo  # Python 3.9+
 
 # ===============================================================
-# 🔧 CONFIGURATION
+# 🔧 CONFIG
 # ===============================================================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "7985423327:AAGRGw6jM-ZK6GkGrExkUwcLQKMDF2nG2vM")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "REPLACE_ME")  # rotate!
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SUBSCRIBERS_FILE = "subscribers.json"
 WAITING_FILE = "waiting.json"
-PAYLOAD_URL = "https://codehubnotify.dev/github"  # your domain webhook endpoint
+PAYLOAD_URL = "https://codehubnotify.dev/github"  # your public webhook URL
+WEBHOOK_SECRET = os.getenv("GH_WEBHOOK_SECRET", "")  # set same value in GitHub → Webhooks
 
 app = Flask(__name__)
 
 # ===============================================================
-# 📂 Helper Functions
+# 📂 Helpers
 # ===============================================================
 def load_json(path):
     if os.path.exists(path):
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             try:
                 return json.load(f)
             except json.JSONDecodeError:
@@ -28,17 +28,36 @@ def load_json(path):
     return []
 
 def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def esc(s):  # Escape for Telegram HTML
+    return html.escape(str(s or ""))
+
+def kh_now():
+    return datetime.datetime.now(ZoneInfo("Asia/Phnom_Penh")).strftime("%Y-%m-%d %H:%M:%S")
 
 def send_message(chat_id, text):
-    """Send formatted HTML message to Telegram."""
-    requests.post(f"{BASE_URL}/sendMessage", data={
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False
-    })
+    # Telegram hard limit is 4096 chars. Chunk safely by paragraphs.
+    if not text:
+        return
+    parts = []
+    buf, limit = "", 3800  # a little margin
+    for line in text.split("\n"):
+        if len(buf) + len(line) + 1 > limit:
+            parts.append(buf)
+            buf = line
+        else:
+            buf += ("\n" if buf else "") + line
+    if buf:
+        parts.append(buf)
+    for p in parts:
+        requests.post(f"{BASE_URL}/sendMessage", data={
+            "chat_id": chat_id,
+            "text": p,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False
+        })
 
 def find_subscriber(chat_id, subscribers):
     for sub in subscribers:
@@ -46,248 +65,356 @@ def find_subscriber(chat_id, subscribers):
             return sub
     return None
 
+def send_to_repo_subs(repo_full_name, msg):
+    subs = load_json(SUBSCRIBERS_FILE)
+    for s in subs:
+        if s.get("repo") == repo_full_name and s.get("active"):
+            send_message(s["chat_id"], msg)
+
+def verify_signature(req):
+    if not WEBHOOK_SECRET:
+        return True
+    their = req.headers.get("X-Hub-Signature-256", "")
+    mac = hmac.new(WEBHOOK_SECRET.encode(), req.data, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(f"sha256={mac}", their)
 
 # ===============================================================
 # 🤖 TELEGRAM HANDLER
 # ===============================================================
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    data = request.get_json()
+    data = request.get_json() or {}
     msg = data.get("message", {})
     chat = msg.get("chat", {})
     chat_id = str(chat.get("id"))
     chat_type = chat.get("type", "private")
-    text = msg.get("text", "").strip()
-
-    # normalize command (remove @BotName)
+    text = (msg.get("text") or "").strip()
     command = text.split('@')[0]
 
     subscribers = load_json(SUBSCRIBERS_FILE)
     waiting = load_json(WAITING_FILE)
 
-    # ---------------------------------------------------------------
-    # /subscribe -> Add user + show payload info
-    # ---------------------------------------------------------------
     if command == "/subscribe":
         if not find_subscriber(chat_id, subscribers):
             subscribers.append({"chat_id": chat_id, "repo": None, "active": False})
             save_json(SUBSCRIBERS_FILE, subscribers)
-            send_message(chat_id, (
-                "✅ You are now subscribed to CodeHub Notify!\n\n"
-                "📩 To receive GitHub updates, make sure this bot is added to the group "
-                "where you want notifications to appear.\n\n"
-                f"Then add this webhook URL to your repository:\n"
-                f"<code>{PAYLOAD_URL}</code>\n\n"
-                "In GitHub, go to:\n"
-                "<b>Settings → Webhooks → Add webhook</b>\n\n"
-                "• <b>Payload URL:</b> paste the link above\n"
-                "• <b>Content type:</b> application/json\n"
-                "• <b>Events:</b> Send me everything ✅\n\n"
-                "After that, use /connect to link your repository name."
-            ))
+            send_message(chat_id,
+                "✅ Subscribed!\n\n"
+                f"Add this webhook in your repo:\n<code>{PAYLOAD_URL}</code>\n\n"
+                "GitHub → Settings → Webhooks → Add webhook\n"
+                "• Content type: application/json\n"
+                "• Secret: (set one and put in GH_WEBHOOK_SECRET)\n"
+                "• Events: Send me everything ✅\n\n"
+                "Then /connect to link your <b>owner/repo</b>.")
         else:
-            send_message(chat_id, "⚠️ You are already subscribed.")
+            send_message(chat_id, "⚠️ Already subscribed.")
 
-    # ---------------------------------------------------------------
-    # /unsubscribe -> Remove user completely
-    # ---------------------------------------------------------------
     elif command == "/unsubscribe":
         before = len(subscribers)
         subscribers = [s for s in subscribers if s["chat_id"] != chat_id]
         save_json(SUBSCRIBERS_FILE, subscribers)
-        if len(subscribers) < before:
-            send_message(chat_id, "🛑 You have been unsubscribed and removed from the system.")
-        else:
-            send_message(chat_id, "❗ You are not subscribed yet.")
+        send_message(chat_id, "🛑 Unsubscribed." if len(subscribers) < before else "❗ Not subscribed.")
 
-    # ---------------------------------------------------------------
-    # /start -> Start receiving notifications
-    # ---------------------------------------------------------------
     elif command == "/start":
         sub = find_subscriber(chat_id, subscribers)
         if not sub:
-            send_message(chat_id, "❗ Please /subscribe first before starting notifications.")
+            send_message(chat_id, "❗ Use /subscribe first.")
         else:
             sub["active"] = True
             save_json(SUBSCRIBERS_FILE, subscribers)
-            send_message(chat_id, "▶️ Notifications started! You’ll now receive GitHub updates.")
+            send_message(chat_id, "▶️ Notifications started.")
 
-    # ---------------------------------------------------------------
-    # /stop -> Stop receiving notifications
-    # ---------------------------------------------------------------
     elif command == "/stop":
         sub = find_subscriber(chat_id, subscribers)
         if not sub:
-            send_message(chat_id, "❗ You are not subscribed yet. Use /subscribe first.")
+            send_message(chat_id, "❗ Not subscribed. Use /subscribe.")
         else:
             sub["active"] = False
             save_json(SUBSCRIBERS_FILE, subscribers)
-            send_message(chat_id, "⏸️ Notifications stopped. You can start again anytime with /start.")
+            send_message(chat_id, "⏸️ Notifications stopped.")
 
-    # ---------------------------------------------------------------
-    # /connect -> Link repository
-    # ---------------------------------------------------------------
     elif command == "/connect":
         sub = find_subscriber(chat_id, subscribers)
         if not sub:
-            send_message(chat_id, "❗ Please /subscribe first before connecting a repo.")
+            send_message(chat_id, "❗ /subscribe first.")
         else:
             if chat_id not in waiting:
                 waiting.append(chat_id)
                 save_json(WAITING_FILE, waiting)
-            send_message(chat_id, (
-                "📎 Please send your GitHub repository link (example: https://github.com/user/repo)\n\n"
-                "If you already connected before, sending a new link will update your repository."
-            ))
+            send_message(chat_id, "📎 Send your GitHub repo link (e.g. https://github.com/user/repo).")
 
-    # ---------------------------------------------------------------
-    # Handle repo input after /connect
-    # ---------------------------------------------------------------
     elif chat_id in waiting:
         repo_input = text.strip()
-
-        # ✅ Only accept GitHub repo links
         if not repo_input.startswith("https://github.com/"):
-            send_message(chat_id, "❌ Please send a valid GitHub repository link (e.g., https://github.com/user/repo)")
+            send_message(chat_id, "❌ Send a valid GitHub repo link.")
             return "ok"
-
-        # Extract the "user/repo" part
         repo_name = repo_input.replace("https://github.com/", "").strip("/")
-
-        # ✅ Validate format "user/repo"
         if "/" not in repo_name or len(repo_name.split("/")) != 2:
-            send_message(chat_id, "⚠️ Invalid repository format. Example: https://github.com/user/repo")
+            send_message(chat_id, "⚠️ Invalid format. Example: https://github.com/user/repo")
             return "ok"
-
-        # ✅ Save or update repo connection
         sub = find_subscriber(chat_id, subscribers)
         if sub:
-            old_repo = sub.get("repo")
+            old = sub.get("repo")
             sub["repo"] = repo_name
             save_json(SUBSCRIBERS_FILE, subscribers)
             waiting.remove(chat_id)
             save_json(WAITING_FILE, waiting)
-
-            if old_repo and old_repo != repo_name:
-                send_message(chat_id,
-                    f"🔁 Repository updated from <b>{old_repo}</b> to <b>{repo_name}</b>\n\n"
-                    f"You’ll now receive notifications from the new repo."
-                )
+            if old and old != repo_name:
+                send_message(chat_id, f"🔁 Updated repo: <b>{esc(old)}</b> → <b>{esc(repo_name)}</b>")
             else:
-                send_message(chat_id,
-                    f"🔗 Connected to <b>{repo_name}</b>\n\n"
-                    f"You’ll now receive GitHub push notifications from this repo."
-                )
+                send_message(chat_id, f"🔗 Connected to <b>{esc(repo_name)}</b>.")
         else:
-            send_message(chat_id, "⚠️ You must /subscribe first before linking a repo.")
+            send_message(chat_id, "❗ /subscribe first.")
 
-    # ---------------------------------------------------------------
-    # /status
-    # ---------------------------------------------------------------
     elif command == "/status":
         sub = find_subscriber(chat_id, subscribers)
         if not sub:
-            send_message(chat_id, "❗ You are not subscribed yet.")
+            send_message(chat_id, "❗ Not subscribed.")
         else:
             repo = sub.get("repo", "Not connected")
             active = "🟢 Active" if sub.get("active") else "🔴 Stopped"
-            send_message(chat_id, f"📊 <b>Status</b>\n\n🔗 Repo: {repo}\n🔔 Notifications: {active}")
+            send_message(chat_id, f"📊 <b>Status</b>\n🔗 Repo: {esc(repo)}\n🔔 {active}")
 
-    # ---------------------------------------------------------------
-    # /subscribers
-    # ---------------------------------------------------------------
     elif command == "/subscribers":
         total = len(subscribers)
         active_users = sum(1 for s in subscribers if s.get("active"))
-        send_message(chat_id, (
-            f"👥 <b>Total Subscribers:</b> {total}\n"
-            f"🔔 <b>Active Notifications:</b> {active_users}\n\n"
-            "Thank you for using CodeHub Notify Bot 🚀"
-        ))
+        send_message(chat_id, f"👥 Total: {total}\n🔔 Active: {active_users}")
 
-    # ---------------------------------------------------------------
-    # /help
-    # ---------------------------------------------------------------
     elif command == "/help":
-        help_msg = (
-            "🤖 <b>Available Commands</b>\n\n"
-            "/subscribe - Subscribe and get webhook info\n"
-            "/unsubscribe - Unsubscribe completely\n"
-            "/start - Start receiving notifications\n"
-            "/stop - Stop receiving notifications\n"
-            "/connect - Link your GitHub repository\n"
-            "/status - Show your connection and status\n"
-            "/subscribers - Show total number of subscribers\n"
-            "/help - Show all available commands"
-        )
-        send_message(chat_id, help_msg)
+        send_message(chat_id,
+            "🤖 Commands:\n"
+            "/subscribe, /unsubscribe, /start, /stop\n"
+            "/connect, /status, /subscribers, /help")
 
     else:
         if chat_type == "private":
-            send_message(chat_id, "❓ Unknown command. Use /help to see available commands.")
-
+            send_message(chat_id, "❓ Unknown command. Use /help.")
     return "ok"
 
-
 # ===============================================================
-# 🪝 GITHUB WEBHOOK HANDLER
+# 🪝 GITHUB WEBHOOK HANDLER (covers most events)
 # ===============================================================
 @app.route("/github", methods=["POST"])
 def github_webhook():
-    payload = request.get_json()
+    if not verify_signature(request):
+        return "invalid signature", 403
+
+    payload = request.get_json(silent=True) or {}
     event = request.headers.get("X-GitHub-Event", "ping")
-    repo = payload.get("repository", {}).get("full_name", "unknown/repo")
-    repo_url = payload.get("repository", {}).get("html_url", "")
-    subscribers = load_json(SUBSCRIBERS_FILE)
+    repo = (payload.get("repository") or {}).get("full_name", "unknown/repo")
+    repo_url = (payload.get("repository") or {}).get("html_url", "")
+    t = kh_now()
 
+    # --- ping (webhook test)
+    if event == "ping":
+        send_to_repo_subs(repo, f"✅ Webhook connected for <a href='{repo_url}'>{esc(repo)}</a> • {t}")
+        return "pong"
+
+    # --- push
     if event == "push":
-        pusher = payload.get("pusher", {}).get("name", "Unknown")
-        branch = payload.get("ref", "").split("/")[-1]
+        pusher = (payload.get("pusher") or {}).get("name", "Unknown")
+        branch = (payload.get("ref") or "").split("/")[-1]
         commits = payload.get("commits", [])
-        commit_count = len(commits)
-        # ✅ Get local time in Cambodia
-        kh_time = datetime.datetime.now(ZoneInfo("Asia/Phnom_Penh")).strftime("%Y-%m-%d %H:%M:%S")
+        lines = []
+        for c in commits[:10]:
+            lines.append(f"• <code>{esc(c.get('message'))}</code> — <b>{esc((c.get('author') or {}).get('name'))}</b>\n"
+                         f"<a href='{c.get('url','')}'>🔗 View commit</a>")
+        more = f"\n…and {len(commits)-10} more." if len(commits) > 10 else ""
+        msg = (f"📦 <a href='{repo_url}'>{esc(repo)}</a>\n"
+               f"🌿 <b>{esc(branch)}</b> • 👤 {esc(pusher)} • 🕒 {t}\n\n"
+               f"🚀 {len(commits)} commit(s):\n" + "\n\n".join(lines) + more)
+        send_to_repo_subs(repo, msg)
+        return "ok"
 
-        commit_lines = ""
-        for commit in commits:
-            message = commit.get("message", "")
-            author = commit.get("author", {}).get("name", "")
-            url = commit.get("url", "")
-            commit_lines += f"• <code>{message}</code> — <b>{author}</b>\n<a href=\"{url}\">🔗 View Commit</a>\n\n"
-
-        msg = (
-            f"📦 <b>Repo:</b> <a href=\"{repo_url}\">{repo}</a>\n"
-            f"👤 <b>Pushed by:</b> {pusher}\n"
-            f"🌿 <b>Branch:</b> {branch}\n"
-            f"🕒 <b>Time:</b> {kh_time}\n\n"
-            f"🚀 <b>{commit_count} commit(s) pushed:</b>\n{commit_lines}"
-        )
-
-    elif event == "create":
+    # --- branches/tags
+    if event in ("create", "delete"):
+        ref = payload.get("ref", "")
         ref_type = payload.get("ref_type", "")
-        ref_name = payload.get("ref", "")
-        sender = payload.get("sender", {}).get("login", "")
-        kh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sender = (payload.get("sender") or {}).get("login", "")
+        icon = "🆕" if event == "create" else "🗑️"
+        msg = (f"{icon} {esc(ref_type)} <b>{esc(ref)}</b> {event}d\n"
+               f"📦 <a href='{repo_url}'>{esc(repo)}</a>\n"
+               f"👤 {esc(sender)} • 🕒 {t}")
+        send_to_repo_subs(repo, msg)
+        return "ok"
 
-        msg = (
-            f"🌿 <b>New Branch Created!</b>\n\n"
-            f"📦 <b>Repo:</b> <a href=\"{repo_url}\">{repo}</a>\n"
-            f"🌱 <b>Branch:</b> {ref_name}\n"
-            f"👤 <b>By:</b> {sender}\n"
-            f"🕒 <b>DateTime:</b> {kh_time}"
-        )
-    else:
-        msg = f"🔔 GitHub event: {event} in {repo}"
+    # --- pull request lifecycle
+    if event == "pull_request":
+        action = payload.get("action", "")
+        pr = payload.get("pull_request") or {}
+        number = pr.get("number", payload.get("number"))
+        title = pr.get("title", "")
+        url = pr.get("html_url", "")
+        sender = (payload.get("sender") or {}).get("login", "")
+        state_text = "merged" if (action == "closed" and pr.get("merged")) else action
+        if action == "synchronize":
+            state_text = "updated (new commits)"
+        msg = (f"🔀 PR <b>#{number}</b> {esc(state_text)}\n"
+               f"📝 <code>{esc(title)}</code>\n"
+               f"📦 <a href='{repo_url}'>{esc(repo)}</a>\n"
+               f"👤 {esc(sender)} • 🕒 {t}\n"
+               f"<a href='{url}'>Open PR</a>")
+        send_to_repo_subs(repo, msg)
+        return "ok"
 
-    for sub in subscribers:
-        if sub.get("repo") == repo and sub.get("active", False):
-            send_message(sub["chat_id"], msg)
+    # --- PR reviews
+    if event == "pull_request_review":
+        review = payload.get("review") or {}
+        pr = payload.get("pull_request") or {}
+        state = (review.get("state") or "").lower()  # approved/changes_requested/commented
+        url = review.get("html_url", pr.get("html_url", ""))
+        sender = (payload.get("sender") or {}).get("login", "")
+        number = pr.get("number", payload.get("number"))
+        msg = (f"🧪 Review <b>{esc(state)}</b> on PR #{number}\n"
+               f"📦 <a href='{repo_url}'>{esc(repo)}</a>\n"
+               f"👤 {esc(sender)} • 🕒 {t}\n"
+               f"<a href='{url}'>View review</a>")
+        send_to_repo_subs(repo, msg)
+        return "ok"
 
+    # --- code comments on PR diffs
+    if event == "pull_request_review_comment":
+        comment = payload.get("comment") or {}
+        pr = payload.get("pull_request") or {}
+        body = comment.get("body", "")
+        url = comment.get("html_url", "")
+        sender = (payload.get("sender") or {}).get("login", "")
+        number = pr.get("number", payload.get("number"))
+        msg = (f"💬 Code comment on PR #{number}\n"
+               f"📝 <code>{esc(body[:300])}</code>\n"
+               f"👤 {esc(sender)} • 🕒 {t}\n"
+               f"<a href='{url}'>View comment</a>")
+        send_to_repo_subs(repo, msg)
+        return "ok"
+
+    # --- issues (also labels/assigns)
+    if event == "issues":
+        action = payload.get("action", "")
+        issue = payload.get("issue") or {}
+        number = issue.get("number")
+        title = issue.get("title", "")
+        url = issue.get("html_url", "")
+        sender = (payload.get("sender") or {}).get("login", "")
+        msg = (f"🐞 Issue <b>#{number}</b> {esc(action)}\n"
+               f"📝 <code>{esc(title)}</code>\n"
+               f"📦 <a href='{repo_url}'>{esc(repo)}</a>\n"
+               f"👤 {esc(sender)} • 🕒 {t}\n"
+               f"<a href='{url}'>Open issue</a>")
+        send_to_repo_subs(repo, msg)
+        return "ok"
+
+    # --- comments (on issues and PRs)
+    if event == "issue_comment":
+        issue = payload.get("issue") or {}
+        body = (payload.get("comment") or {}).get("body", "")
+        url = (payload.get("comment") or {}).get("html_url", "")
+        sender = (payload.get("sender") or {}).get("login", "")
+        number = issue.get("number")
+        kind = "PR" if "pull_request" in issue else "Issue"
+        msg = (f"💬 Comment on {kind} #{number}\n"
+               f"📝 <code>{esc(body[:300])}</code>\n"
+               f"👤 {esc(sender)} • 🕒 {t}\n"
+               f"<a href='{url}'>View comment</a>")
+        send_to_repo_subs(repo, msg)
+        return "ok"
+
+    # --- commit comments
+    if event == "commit_comment":
+        comment = payload.get("comment") or {}
+        body = comment.get("body", "")
+        url = comment.get("html_url", "")
+        sender = (payload.get("sender") or {}).get("login", "")
+        msg = (f"💬 Comment on commit\n"
+               f"📝 <code>{esc(body[:300])}</code>\n"
+               f"👤 {esc(sender)} • 🕒 {t}\n"
+               f"<a href='{url}'>View comment</a>")
+        send_to_repo_subs(repo, msg)
+        return "ok"
+
+    # --- stars & forks
+    if event == "star":
+        action = payload.get("action", "")
+        sender = (payload.get("sender") or {}).get("login", "")
+        msg = f"⭐ Repo <a href='{repo_url}'>{esc(repo)}</a> {esc(action)} by {esc(sender)} • 🕒 {t}"
+        send_to_repo_subs(repo, msg)
+        return "ok"
+
+    if event == "fork":
+        forkee = (payload.get("forkee") or {}).get("full_name", "")
+        sender = (payload.get("sender") or {}).get("login", "")
+        msg = (f"🍴 Forked by {esc(sender)} → <b>{esc(forkee)}</b>\n"
+               f"📦 <a href='{repo_url}'>{esc(repo)}</a> • 🕒 {t}")
+        send_to_repo_subs(repo, msg)
+        return "ok"
+
+    # --- releases
+    if event == "release":
+        action = payload.get("action", "")
+        rel = payload.get("release") or {}
+        tag = rel.get("tag_name", "")
+        url = rel.get("html_url", repo_url)
+        sender = (payload.get("sender") or {}).get("login", "")
+        msg = (f"🏷️ Release <b>{esc(tag)}</b> {esc(action)}\n"
+               f"📦 <a href='{url}'>Open release</a>\n"
+               f"👤 {esc(sender)} • 🕒 {t}")
+        send_to_repo_subs(repo, msg)
+        return "ok"
+
+    # --- workflows / checks
+    if event == "workflow_run":
+        wr = payload.get("workflow_run") or {}
+        name = wr.get("name", "")
+        status = wr.get("status", "")
+        conclusion = wr.get("conclusion", "")
+        url = wr.get("html_url", repo_url)
+        msg = (f"🛠️ Workflow <b>{esc(name)}</b>\n"
+               f"Status: <b>{esc(status)}</b> • Result: <b>{esc(conclusion)}</b>\n"
+               f"<a href='{url}'>Open run</a> • 🕒 {t}")
+        send_to_repo_subs(repo, msg)
+        return "ok"
+
+    if event in ("check_suite", "check_run"):
+        obj = payload.get("check_suite") or payload.get("check_run") or {}
+        name = obj.get("name", payload.get("action", ""))
+        status = obj.get("status", "")
+        conclusion = obj.get("conclusion", "")
+        url = obj.get("html_url", repo_url)
+        msg = (f"✅ {esc(event)} <b>{esc(name)}</b>\n"
+               f"Status: <b>{esc(status)}</b> • Result: <b>{esc(conclusion)}</b>\n"
+               f"<a href='{url}'>Open</a> • 🕒 {t}")
+        send_to_repo_subs(repo, msg)
+        return "ok"
+
+    # --- deployments
+    if event in ("deployment", "deployment_status"):
+        dep = payload.get("deployment") or {}
+        env = dep.get("environment", "")
+        state = (payload.get("deployment_status") or {}).get("state", payload.get("action", ""))
+        url = (payload.get("deployment_status") or {}).get("target_url", repo_url)
+        msg = (f"🚀 Deployment <b>{esc(env)}</b> • State: <b>{esc(state)}</b>\n"
+               f"<a href='{url}'>Details</a> • 🕒 {t}")
+        send_to_repo_subs(repo, msg)
+        return "ok"
+
+    # --- security alerts
+    if event == "repository_vulnerability_alert":
+        action = payload.get("action", "")
+        alert = payload.get("alert") or {}
+        pkg = (alert.get("affected_package_name") or "")
+        adv = ((alert.get("advisory") or {}).get("summary") or "")
+        msg = (f"🛡️ Vulnerability {esc(action)}\n"
+               f"📦 Package: <b>{esc(pkg)}</b>\n"
+               f"📝 <code>{esc(adv[:300])}</code>\n"
+               f"🕒 {t}")
+        send_to_repo_subs(repo, msg)
+        return "ok"
+
+    # --- fallback for everything else
+    send_to_repo_subs(repo, f"🔔 Event <b>{esc(event)}</b> • 🕒 {t}\n<a href='{repo_url}'>Open repo</a>")
     return "ok"
 
-
 # ===============================================================
-# 🚀 RUN SERVER
+# 🚀 Run
 # ===============================================================
 if __name__ == "__main__":
     print("✅ CodeHub Notify Bot started on port 8080")
