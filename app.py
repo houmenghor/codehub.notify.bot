@@ -1,8 +1,7 @@
 from flask import Flask, request
 import requests, json, os, datetime, html, hmac, hashlib, secrets
 from waitress import serve
-import datetime
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo  # Python 3.9+
 
 # ===============================================================
 # 🔧 CONFIG (no disk required)
@@ -47,11 +46,7 @@ def esc(s):  # Escape for Telegram HTML
     return html.escape(str(s or ""))
 
 def kh_now():
-    now = datetime.datetime.now(ZoneInfo("Asia/Phnom_Penh"))
-    label = now.tzname() or "ICT"  # fallback
-    # Example: 2025-11-04 10:01 PM ICT
-    return f"{now.strftime('%Y-%m-%d %I:%M %p')} {label}"
-
+    return datetime.datetime.now(ZoneInfo("Asia/Phnom_Penh")).strftime("%Y-%m-%d %H:%M")
 
 def load_json(path):
     if os.path.exists(path):
