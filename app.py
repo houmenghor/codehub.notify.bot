@@ -184,12 +184,18 @@ def telegram_webhook():
             old = sub.get("repo")
             sub["repo"] = repo_name
             save_json(SUBSCRIBERS_FILE, subscribers)
+
+            # remove from waiting
             waiting.remove(chat_id)
             save_json(WAITING_FILE, waiting)
+
+            # 👇 Add the nudge to /start (or confirm if already active)
+            next_step = "✅ Notifications are ON." if sub.get("active") else "👉 Now send <b>/start</b> to begin notifications."
+
             if old and old != repo_name:
-                send_message(chat_id, f"🔁 Updated repo: <b>{esc(old)}</b> → <b>{esc(repo_name)}</b>")
+                send_message(chat_id, f"🔁 Updated repo: <b>{esc(old)}</b> → <b>{esc(repo_name)}</b>\n{next_step}")
             else:
-                send_message(chat_id, f"🔗 Connected to <b>{esc(repo_name)}</b>.")
+                send_message(chat_id, f"🔗 Connected to <b>{esc(repo_name)}</b>.\n{next_step}")
         else:
             send_message(chat_id, "❗ /subscribe first.")
 
