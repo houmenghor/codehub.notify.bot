@@ -1,7 +1,8 @@
 from flask import Flask, request
 import requests, json, os, datetime, html, hmac, hashlib, secrets
 from waitress import serve
-from zoneinfo import ZoneInfo  # Python 3.9+
+import datetime
+from zoneinfo import ZoneInfo
 
 # ===============================================================
 # 🔧 CONFIG (no disk required)
@@ -47,9 +48,10 @@ def esc(s):  # Escape for Telegram HTML
 
 def kh_now():
     now = datetime.datetime.now(ZoneInfo("Asia/Phnom_Penh"))
+    label = now.tzname() or "ICT"  # fallback
     # Example: 2025-11-04 10:01 PM ICT
-    return f"{now.strftime('%Y-%m-%d %I:%M %p')} {now.tzname()}"
-    
+    return f"{now.strftime('%Y-%m-%d %I:%M %p')} {label}"
+
 
 def load_json(path):
     if os.path.exists(path):
@@ -187,18 +189,12 @@ def telegram_webhook():
             old = sub.get("repo")
             sub["repo"] = repo_name
             save_json(SUBSCRIBERS_FILE, subscribers)
-
-            # remove from waiting
             waiting.remove(chat_id)
             save_json(WAITING_FILE, waiting)
-
-            # 👇 Add the nudge to /start (or confirm if already active)
-            next_step = "✅ Notifications are ON." if sub.get("active") else "👉 Now send <b>/start</b> to begin notifications."
-
             if old and old != repo_name:
-                send_message(chat_id, f"🔁 Updated repo: <b>{esc(old)}</b> → <b>{esc(repo_name)}</b>\n{next_step}")
+                send_message(chat_id, f"🔁 Updated repo: <b>{esc(old)}</b> → <b>{esc(repo_name)}</b>")
             else:
-                send_message(chat_id, f"🔗 Connected to <b>{esc(repo_name)}</b>.\n{next_step}")
+                send_message(chat_id, f"🔗 Connected to <b>{esc(repo_name)}</b>.")
         else:
             send_message(chat_id, "❗ /subscribe first.")
 
