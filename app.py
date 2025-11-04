@@ -1,35 +1,30 @@
 from flask import Flask, request
-import requests, json, os, datetime, html, hmac, hashlib, shutil, secrets
+import requests, json, os, datetime, html, hmac, hashlib, secrets
 from waitress import serve
 from zoneinfo import ZoneInfo  # Python 3.9+
 
 # ===============================================================
-# 🔧 CONFIG
+# 🔧 CONFIG (no disk required)
 # ===============================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "REPLACE_ME")
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Public webhook URL you’ll paste into GitHub (should end with /github)
-PUBLIC_WEBHOOK_URL = os.getenv("PUBLIC_WEBHOOK_URL", "https://codehubnotify.dev/github")
+# Public URL you’ll paste into GitHub (should end with /github)
+PUBLIC_WEBHOOK_URL = os.getenv("PUBLIC_WEBHOOK_URL", "https://your-domain.example/github")
 
-# Render disk mount (set DATA_DIR=/var/data and attach a Disk)
-DATA_DIR = os.getenv("DATA_DIR", ".")
+# Store files next to this script (ephemeral on Render redeploys)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.getenv("DATA_DIR", BASE_DIR)  # keep default: app folder
 os.makedirs(DATA_DIR, exist_ok=True)
 
 SUBSCRIBERS_FILE = os.path.join(DATA_DIR, "subscribers.json")
 WAITING_FILE     = os.path.join(DATA_DIR, "waiting.json")
 SECRET_FILE      = os.path.join(DATA_DIR, "github_secret.txt")
 
-# Secret priority: env > persisted file > auto-generate & persist
+# Secret priority: env > file > auto-generate (file is ephemeral across deploys)
 _env_secret = os.getenv("GH_WEBHOOK_SECRET", "").strip()
 if _env_secret:
     GH_SECRET = _env_secret
-    # also persist a copy for visibility via /secret if you want
-    try:
-        with open(SECRET_FILE, "w", encoding="utf-8") as f:
-            f.write(GH_SECRET)
-    except Exception:
-        pass
 else:
     if os.path.exists(SECRET_FILE):
         GH_SECRET = open(SECRET_FILE, "r", encoding="utf-8").read().strip()
@@ -51,7 +46,7 @@ def esc(s):  # Escape for Telegram HTML
     return html.escape(str(s or ""))
 
 def kh_now():
-    return datetime.datetime.now(ZoneInfo("Asia/Phnom_Penh")).strftime("%Y-%m-%d %H:%M")
+    return datetime.datetime.now(ZoneInfo("Asia/Phnom_Penh")).strftime("%Y-%m-%d %H:%M:%S")
 
 def load_json(path):
     if os.path.exists(path):
@@ -63,56 +58,36 @@ def load_json(path):
     return []
 
 def save_json(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, path)  # atomic write
-
-# first-boot bootstrap if needed (migrate legacy files from repo dir)
-def bootstrap_data_files():
-    for name in ("subscribers.json", "waiting.json"):
-        dst = os.path.join(DATA_DIR, name)
-        if not os.path.exists(dst):
-            legacy = os.path.join(os.path.dirname(__file__), name)
-            if os.path.exists(legacy):
-                shutil.copy2(legacy, dst)
-            else:
-                save_json(dst, [])
-
-bootstrap_data_files()
-
-def send_message(chat_id, text):
-    if not text:
-        return
-    # Telegram limit ≈4096 chars. Chunk with margin.
-    limit = 3800
-    lines = text.split("\n")
-    buf = ""
-    for ln in lines:
-        if len(buf) + len(ln) + 1 > limit:
-            requests.post(f"{BASE_URL}/sendMessage", data={
-                "chat_id": chat_id,
-                "text": buf,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": False
-            })
-            buf = ln
-        else:
-            buf += ("\n" if buf else "") + ln
-    if buf:
-        requests.post(f"{BASE_URL}/sendMessage", data={
-            "chat_id": chat_id,
-            "text": buf,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": False
-        })
 
 def find_subscriber(chat_id, subscribers):
     for sub in subscribers:
         if sub["chat_id"] == chat_id:
             return sub
     return None
+
+def send_message(chat_id, text):
+    if not text:
+        return
+    limit = 3800  # Telegram ~4096
+    buf = ""
+    for ln in text.split("\n"):
+        if len(buf) + len(ln) + 1 > limit:
+            requests.post(f"{BASE_URL}/sendMessage", data={
+                "chat_id": chat_id, "text": buf,
+                "parse_mode": "HTML", "disable_web_page_preview": False
+            })
+            buf = ln
+        else:
+            buf += ("\n" if buf else "") + ln
+    if buf:
+        requests.post(f"{BASE_URL}/sendMessage", data={
+            "chat_id": chat_id, "text": buf,
+            "parse_mode": "HTML", "disable_web_page_preview": False
+        })
 
 def send_to_repo_subs(repo_full_name, msg):
     subs = load_json(SUBSCRIBERS_FILE)
@@ -121,8 +96,7 @@ def send_to_repo_subs(repo_full_name, msg):
             send_message(s["chat_id"], msg)
 
 def verify_signature(req):
-    # If GH_SECRET is empty (shouldn’t happen with our generator), accept all
-    if not GH_SECRET:
+    if not GH_SECRET:  # should never happen here
         return True
     their = req.headers.get("X-Hub-Signature-256", "")
     mac = hmac.new(GH_SECRET.encode(), req.data, hashlib.sha256).hexdigest()
@@ -144,7 +118,6 @@ def telegram_webhook():
     subscribers = load_json(SUBSCRIBERS_FILE)
     waiting = load_json(WAITING_FILE)
 
-    # /subscribe -> add subscriber + show webhook URL + secret
     if command == "/subscribe":
         if not find_subscriber(chat_id, subscribers):
             subscribers.append({"chat_id": chat_id, "repo": None, "active": False})
@@ -196,7 +169,6 @@ def telegram_webhook():
                 save_json(WAITING_FILE, waiting)
             send_message(chat_id, "📎 Send your GitHub repository link (e.g., https://github.com/owner/repo).")
 
-    # Handle repo input after /connect
     elif chat_id in waiting:
         repo_input = text.strip()
         if not repo_input.startswith("https://github.com/"):
@@ -254,7 +226,7 @@ def telegram_webhook():
     return "ok"
 
 # ===============================================================
-# 🪝 GITHUB WEBHOOK HANDLER (rich coverage)
+# 🪝 GITHUB WEBHOOK HANDLER
 # ===============================================================
 @app.route("/github", methods=["POST"])
 def github_webhook():
@@ -267,12 +239,10 @@ def github_webhook():
     repo_url = (payload.get("repository") or {}).get("html_url", "")
     t = kh_now()
 
-    # ping
     if event == "ping":
         send_to_repo_subs(repo, f"✅ Webhook connected for <a href='{repo_url}'>{esc(repo)}</a> • {t}")
         return "pong"
 
-    # push
     if event == "push":
         pusher = (payload.get("pusher") or {}).get("name", "Unknown")
         branch = (payload.get("ref") or "").split("/")[-1]
@@ -290,7 +260,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # create/delete (branches/tags)
     if event in ("create", "delete"):
         ref = payload.get("ref", "")
         ref_type = payload.get("ref_type", "")
@@ -302,7 +271,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # pull request lifecycle (from ➜ to)
     if event == "pull_request":
         action = payload.get("action", "")
         pr = payload.get("pull_request") or {}
@@ -322,7 +290,7 @@ def github_webhook():
         elif action == "converted_to_draft":
             state_text = "converted to draft"
         else:
-            state_text = action  # opened / reopened / closed / etc.
+            state_text = action
 
         msg = (
             f"🔀 <b>Pull request #{number} {esc(state_text)}</b>\n"
@@ -335,7 +303,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # PR reviews
     if event == "pull_request_review":
         review = payload.get("review") or {}
         pr = payload.get("pull_request") or {}
@@ -350,7 +317,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # Inline code comments on PR diffs
     if event == "pull_request_review_comment":
         comment = payload.get("comment") or {}
         pr = payload.get("pull_request") or {}
@@ -365,7 +331,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # Issues (open/close/label/assign etc.)
     if event == "issues":
         action = payload.get("action", "")
         issue = payload.get("issue") or {}
@@ -381,7 +346,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # Comments (issues & PRs)
     if event == "issue_comment":
         issue = payload.get("issue") or {}
         body = (payload.get("comment") or {}).get("body", "")
@@ -396,7 +360,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # Commit comments
     if event == "commit_comment":
         comment = payload.get("comment") or {}
         body = comment.get("body", "")
@@ -409,7 +372,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # Stars & forks
     if event == "star":
         action = payload.get("action", "")
         sender = (payload.get("sender") or {}).get("login", "")
@@ -425,7 +387,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # Releases
     if event == "release":
         action = payload.get("action", "")
         rel = payload.get("release") or {}
@@ -438,7 +399,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # Workflows / checks
     if event == "workflow_run":
         wr = payload.get("workflow_run") or {}
         name = wr.get("name", "")
@@ -463,7 +423,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # Deployments
     if event in ("deployment", "deployment_status"):
         dep = payload.get("deployment") or {}
         env = dep.get("environment", "")
@@ -474,7 +433,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # Security alerts
     if event == "repository_vulnerability_alert":
         action = payload.get("action", "")
         alert = payload.get("alert") or {}
@@ -487,7 +445,6 @@ def github_webhook():
         send_to_repo_subs(repo, msg)
         return "ok"
 
-    # fallback for anything else
     send_to_repo_subs(repo, f"🔔 Event <b>{esc(event)}</b> • 🕒 {t}\n<a href='{repo_url}'>Open repo</a>")
     return "ok"
 
