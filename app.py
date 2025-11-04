@@ -46,7 +46,9 @@ def esc(s):  # Escape for Telegram HTML
     return html.escape(str(s or ""))
 
 def kh_now():
-    return datetime.datetime.now(ZoneInfo("Asia/Phnom_Penh")).strftime("%Y-%m-%d %H:%M")
+    now = datetime.datetime.now(ZoneInfo("Asia/Phnom_Penh"))
+    # Example: 2025-11-04 10:01 PM ICT
+    return f"{now.strftime('%Y-%m-%d %I:%M %p')} {now.tzname()}"
 
 def load_json(path):
     if os.path.exists(path):
